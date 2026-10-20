@@ -62,13 +62,26 @@ class MrpProduction(models.Model):
         return self.move_raw_ids.filtered(lambda o: o.propagate_lot_number)
 
     def _get_propagated_lot_names(self):
-        """Get lot/serial names reserved on the propagating component.
+        """Get serial names reserved on the propagating component.
 
-        Those names are the ones expected on the finished product
+        Those names are the ones expected on the finished product.
+        Only serial-tracked lines holding exactly one unit are usable,
+        as the propagation is a 1:1 match between component and finished
+        product serials.
         """
         self.ensure_one()
         move = self._get_propagating_component_move()
-        return move.move_line_ids.filtered(lambda ln: ln.lot_id).mapped("lot_id.name")
+        lines = move.move_line_ids.filtered(
+            lambda ln: (
+                ln.lot_id
+                and ln.product_id.tracking == "serial"
+                and tools.float_compare(
+                    ln.quantity, 1, precision_rounding=ln.product_uom_id.rounding
+                )
+                == 0
+            )
+        )
+        return list(dict.fromkeys(lines.mapped("lot_id.name")))
 
     def _set_lot_number_propagation_data_from_bom(self):
         """Copy information from BoM to the manufacturing order."""

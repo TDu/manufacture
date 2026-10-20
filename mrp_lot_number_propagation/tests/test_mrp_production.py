@@ -60,23 +60,6 @@ class TestMrpProduction(Common):
         form.product_qty = qty
         return form.save()
 
-    def _init_inventory(cls, product, location, qty=1, lot_name=None):
-        lot = None
-        if lot_name:
-            lot = cls.env["stock.lot"].search(
-                [("product_id", "=", product.id), ("name", "=", lot_name)]
-            )
-            if not lot:
-                lot = cls.env["stock.lot"].create(
-                    {"name": lot_name, "product_id": product.id}
-                )
-        cls.env["stock.quant"]._update_available_quantity(
-            product,
-            location,
-            quantity=qty,
-            lot_id=lot,
-        )
-
     def _set_qty_done(self, order):
         for line in order.move_raw_ids.move_line_ids:
             line.quantity = line.quantity_product_uom
@@ -148,28 +131,13 @@ class TestMrpProduction(Common):
         """Assign a finished lot to the order, bypassing the write guard."""
         order.with_context(lot_propagation=True).lot_producing_ids = lot
 
-    def test_assign_component_move_keeps_matching_finished_lot(self):
-        """Re-reserving the same component serials keeps the finished lots."""
-        self._update_stock_component_qty(self.order)
-        self.order.action_confirm()
-        lot = self.env["stock.lot"].create(
-            {
-                "product_id": self.order.product_id.id,
-                "company_id": self.order.company_id.id,
-                "name": self.LOT_NAME,
-            }
-        )
-        self._assign_finished_lot(self.order, lot)
-        move = self.order._get_propagating_component_move()
-        move._do_unreserve()
-        # re-reservation finds the same serial: nothing to clean up
-        move._action_assign()
-        self.assertEqual(self.order.lot_producing_ids, lot)
+    def _prepare_unreserved_component_move(
+        self, used_finished_lot=False, remove_component_stock=True
+    ):
+        """Confirm an order with a finished lot assigned, then unreserve.
 
-    def test_unreserve_component_move_clears_outdated_finished_lot(self):
-        """Component serial no longer reserved: the finished lot is stale.
-
-        The unused finished lot must be removed from the order and deleted.
+        Returns ``(move, lot)``; the caller re-reserves the component move
+        with ``move._action_assign()`` and asserts the outcome.
         """
         self._update_stock_component_qty(self.order)
         self.order.action_confirm()
@@ -180,17 +148,40 @@ class TestMrpProduction(Common):
                 "name": self.LOT_NAME,
             }
         )
+        if used_finished_lot:
+            self._update_qty_in_location(
+                self.stock_location, self.order.product_id, 1, lot=lot
+            )
         self._assign_finished_lot(self.order, lot)
         move = self.order._get_propagating_component_move()
         move._do_unreserve()
-        # remove the serial from stock: re-reservation finds nothing, the
-        #  finished lot no longer matches any component serial
-        self.env["stock.quant"]._update_available_quantity(
-            self.product_tracked_by_sn,
-            self.stock_location,
-            -1,
-            lot_id=self.existing_lot,
+        if remove_component_stock:
+            # remove the serial from stock: re-reservation cannot find it,
+            #  so the assigned finished lot no longer matches any component
+            #  serial
+            self.env["stock.quant"]._update_available_quantity(
+                self.product_tracked_by_sn,
+                self.stock_location,
+                -1,
+                lot_id=self.existing_lot,
+            )
+        return move, lot
+
+    def test_assign_component_move_keeps_matching_finished_lot(self):
+        """Re-reserving the same component serials keeps the finished lots."""
+        move, lot = self._prepare_unreserved_component_move(
+            remove_component_stock=False
         )
+        # re-reservation finds the same serial: nothing to clean up
+        move._action_assign()
+        self.assertEqual(self.order.lot_producing_ids, lot)
+
+    def test_unreserve_component_move_clears_outdated_finished_lot(self):
+        """Component serial no longer reserved: the finished lot is stale.
+
+        The unused finished lot must be removed from the order and deleted.
+        """
+        move, lot = self._prepare_unreserved_component_move()
         move._action_assign()
         self.assertFalse(self.order.lot_producing_ids)
         # the finished lot was unused, it must have been deleted
@@ -198,27 +189,7 @@ class TestMrpProduction(Common):
 
     def test_unreserve_component_move_keeps_used_finished_lot(self):
         """Same as above, but the finished lot already has stock: keep it."""
-        self._update_stock_component_qty(self.order)
-        self.order.action_confirm()
-        lot = self.env["stock.lot"].create(
-            {
-                "product_id": self.order.product_id.id,
-                "company_id": self.order.company_id.id,
-                "name": self.LOT_NAME,
-            }
-        )
-        self._update_qty_in_location(
-            self.stock_location, self.order.product_id, 1, lot=lot
-        )
-        self._assign_finished_lot(self.order, lot)
-        move = self.order._get_propagating_component_move()
-        move._do_unreserve()
-        self.env["stock.quant"]._update_available_quantity(
-            self.product_tracked_by_sn,
-            self.stock_location,
-            -1,
-            lot_id=self.existing_lot,
-        )
+        move, lot = self._prepare_unreserved_component_move(used_finished_lot=True)
         move._action_assign()
         # the finished lot is detached from the order...
         self.assertFalse(self.order.lot_producing_ids)

@@ -190,15 +190,6 @@ class Common(common.TransactionCase):
                 cls._update_qty_in_location(location, product, quantity)
 
     @classmethod
-    def _get_lot_quants(cls, lot, location=None):
-        quants = lot.quant_ids.filtered(lambda q: q.quantity > 0)
-        if location:
-            quants = quants.filtered(
-                lambda q: q.location_id.parent_path in location.parent_path
-            )
-        return quants
-
-    @classmethod
     def _add_trucks_variants(cls, product_template):
         cls._add_variants(
             product_template,
